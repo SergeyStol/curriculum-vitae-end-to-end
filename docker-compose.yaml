@@ -1,0 +1,131 @@
+services:
+  api: # api-gateway-service
+    image: api-gateway-service:latest
+    build: ../api-gateway-service
+    restart: "no"
+    ports:
+      - "8080:8080"
+    environment:
+      DISCOVERY_SERVICE_URI: http://dsc:8761/eureka
+      SECURITY_CLIENT_ID: api-gateway-service
+      SECURITY_CLIENT_SECRET: "**********"
+      SECURITY_GRANT_TYPE: password
+      SECURITY_TOKEN_URI: http://kk:9080/realms/javaguru/protocol/openid-connect/token
+      SECURITY_ISSUER_URI: http://kk:9080/realms/javaguru
+      SECURITY_JWKS_URI: http://kk:9080/realms/javaguru/protocol/openid-connect/certs
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    depends_on:
+      kk:
+        condition: service_healthy
+      dsc:
+        condition: service_healthy
+  dsc: # discovery-service
+    image: discovery-service:latest
+    build: ../discovery-service
+    restart: "no"
+    ports:
+      - "8761:8761"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8761/actuator/health || exit 1
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+  exp: # experience-service
+    image: experience-service:latest
+    build: ../experience-service
+    environment:
+      DISCOVERY_SERVICE_URI: http://dsc:8761/eureka
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/experience_srv
+    restart: "no"
+    ports:
+      - "8081:8081"
+    depends_on:
+      dsc:
+        condition: service_healthy
+  ind: # industry-service
+    image: industry-service:latest
+    build: ../industry-service
+    restart: "no"
+    environment:
+      DISCOVERY_SERVICE_URI: http://dsc:8761/eureka
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/industry_srv
+    ports:
+      - "8082:8082"
+    depends_on:
+      dsc:
+        condition: service_healthy
+  postgres:
+    image: postgres:17.1
+    restart: "no"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./create_dbs.sql:/docker-entrypoint-initdb.d/create_dbs.sql
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+      POSTGRES_DB: keycloak-srv
+    healthcheck:
+      test: pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+  kk:
+    image: quay.io/keycloak/keycloak:latest
+    restart: "no"
+    command:
+      - "start-dev"
+      - "--import-realm"
+      - "--verbose"
+    ports:
+      - "9080:9080"
+    environment:
+      KC_HTTP_PORT: 9080
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_PORT: 5432
+      KC_DB_URL_DATABASE: keycloak_service
+      KC_DB_USERNAME: postgres
+      KC_DB_PASSWORD: 123
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak_realm/:/opt/keycloak/data/import/
+    healthcheck:
+      test:
+        [ "CMD-SHELL", "{ exec 3<>/dev/tcp/localhost/9000 && echo -e \"GET /health/ready HTTP/1.1\nhost: localhost:9000\n\" >&3 && timeout --preserve-status 1 cat <&3 | grep -m 1 -q 'status.*UP'; }" ]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+  newman:
+    image: postman/newman
+    volumes:
+      - type: bind
+        source: ./postman
+        target: /etc/newman
+    entrypoint: [
+      "newman",
+      "run",
+      "end-to-end-tests.postman_collection.json",
+      "-e",
+      "http-host.docker.internal-8080.postman_environment.json"
+    ]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - tests
+volumes:
+  postgres_data:
